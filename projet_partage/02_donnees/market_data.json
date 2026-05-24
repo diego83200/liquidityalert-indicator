@@ -1,0 +1,12 @@
+{
+  "timestamp": "2026-05-24T10:55:22.122121",
+  "stale": true,
+  "btc_price": 77559,
+  "btc_change_24h": 0,
+  "tvl_global_bn": 88.0,
+  "cvd_estimate": -60,
+  "sources": {
+    "price": "stale",
+    "tvl": "stale"
+  }
+}
