@@ -1,9 +1,16 @@
-import { useState, useMemo } from "react";
+import { useState, useMemo, useEffect, useRef } from "react";
 import {
   ComposedChart, Line, Area, Bar, XAxis, YAxis,
   CartesianGrid, Tooltip, ResponsiveContainer,
   Cell, ReferenceLine, ReferenceArea,
 } from "recharts";
+import { DEFAULT_WEIGHTS, runOptimizer } from "./src/optimizer.js";
+import { fetchLiveBTC, fetchLiveTVL } from "./src/liveData.js";
+import { analyzeWithClaude } from "./src/claudeAgent.js";
+import {
+  loadSignalHistory, saveSignalToMemory,
+  requestNotificationPermission, checkZoneTransition,
+} from "./src/alertSystem.js";
 
 // ─── BTC Monthly · TVL (Bn$) · CVD (-100→+100) · Jan 2018 – Apr 2026 ──────────
 // NOTE 2025-2026: prix = plus hauts mensuels réels (source utilisateur)
@@ -71,9 +78,10 @@ const RAW = [
 
 // ─── Indicator Engine ─────────────────────────────────────────────────────────
 // Scoring v4: devS/30 · slopeS/20 · momS/15 · durS/15 · tvlS/10 · cvdS/10 · crashS/15
-// v4 changes: flash-crash velocity (+15 pts), filtre recovery (>25% depuis creux 6m),
-//             filtre MA en descente rapide (slope 3m < -3%), seuil 55→50 (5/5 cycles)
-function buildOCM(raw) {
+// weights param enables ML optimization via genetic algorithm (src/optimizer.js)
+function buildOCM(raw, weights = DEFAULT_WEIGHTS) {
+  const { dev: wDev, slope: wSlope, bounce: wBounce, duration: wDur,
+          tvl: wTvl, cvd: wCvd, crash: wCrash } = weights;
   const MA_P = 12;
 
   const mas = raw.map((_, i) => {
@@ -111,55 +119,55 @@ function buildOCM(raw) {
         if (min6 > 0 && (d.p - min6) / min6 * 100 > 25) inRecovery = true;
       }
 
-      // ─── ⑦ Flash crash velocity (0–15 pts) — calculé en premier ──────────
+      // ⑦ Flash crash velocity — calculé en premier (0–wCrash pts)
       if (i >= 2) {
         const prevHigh = Math.max(...raw.slice(Math.max(0, i - 2), i).map(x => x.p));
         const drop = prevHigh > 0 ? (d.p - prevHigh) / prevHigh * 100 : 0;
-        if (drop < -15) crashS = Math.min(15, Math.round((-drop - 15) * 0.9));
+        if (drop < -15) crashS = Math.min(wCrash, Math.round((-drop - 15) * 0.9));
       }
 
-      // ① Deviation depth (0–30 pts)
-      devS = Math.min(30, Math.round((-dev / 50) * 30));
+      // ① Deviation depth (0–wDev pts)
+      devS = Math.min(wDev, Math.round((-dev / 50) * wDev));
       if (maDeclining) devS = Math.round(devS * 0.7);
       if (inRecovery)  devS = Math.round(devS * 0.3);
 
-      // ② MA slope deceleration (0–20 pts)
+      // ② MA slope deceleration (0–wSlope pts)
       if (i >= 2 && mas[i - 1] && mas[i - 2]) {
         const s1 = (mas[i] - mas[i - 1]) / mas[i - 1];
         const s2 = (mas[i - 1] - mas[i - 2]) / mas[i - 2];
         const improvement = s1 - s2;
         const base = s1 < 0 ? 6 : 0;
-        slopeS = Math.min(20, Math.max(0, Math.round(improvement * 250 + base)));
+        slopeS = Math.min(wSlope, Math.max(0, Math.round(improvement * 250 + base)));
         if (maDeclining) slopeS = Math.min(slopeS, 5);
         if (inRecovery)  slopeS = Math.round(slopeS * 0.3);
       }
 
-      // ③ Bounce + stabilization (0–15 pts)
+      // ③ Bounce + stabilization (0–wBounce pts)
       if (i >= 4) {
         const win = raw.slice(Math.max(0, i - 6), i + 1).map(x => x.p);
         const localMin = Math.min(...win);
         const bounce = localMin > 0 ? (d.p - localMin) / localMin * 100 : 0;
-        momS = Math.min(15, Math.round(bounce * 1.5));
+        momS = Math.min(wBounce, Math.round(bounce * 1.5));
 
         if (momS < 5 && i >= 2) {
           const m1 = (d.p - raw[i - 1].p) / raw[i - 1].p * 100;
           const m2 = (raw[i - 1].p - raw[i - 2].p) / raw[i - 2].p * 100;
           if (m2 < -5 && m1 > m2) {
-            momS = Math.min(15, momS + Math.round((m1 - m2) * 0.5));
+            momS = Math.min(wBounce, momS + Math.round((m1 - m2) * 0.5));
           }
         }
       }
 
-      // ④ Consecutive months below MA (0–15 pts)
+      // ④ Consecutive months below MA (0–wDur pts)
       let dur = 0;
       for (let j = i; j >= 0; j--) {
         if (mas[j] !== null && raw[j].p < mas[j]) dur++;
         else break;
       }
-      durS = Math.min(15, Math.round(dur * 1.7));
+      durS = Math.min(wDur, Math.round(dur * 1.7));
       if (inRecovery) durS = Math.round(durS * 0.5);
 
-      // ⑤ TVL Signal (0–10 pts)
+      // ⑤ TVL Signal (0–wTvl pts)
       if (i >= 3 && d.tvl != null) {
         const tvl3m = raw[i - 3].tvl;
         const tvl6m = raw[Math.max(0, i - 6)].tvl;
@@ -168,19 +176,19 @@ function buildOCM(raw) {
 
         if (wasDecline && nowRecovering) {
           const recovPct = (d.tvl - tvl3m) / tvl3m * 100;
-          tvlS = Math.min(10, Math.round(recovPct * 0.8));
+          tvlS = Math.min(wTvl, Math.round(recovPct * 0.8));
         } else if (nowRecovering) {
-          tvlS = Math.min(5, Math.round((d.tvl - tvl3m) / tvl3m * 50));
+          tvlS = Math.min(Math.floor(wTvl / 2), Math.round((d.tvl - tvl3m) / tvl3m * 50));
         } else if (wasDecline) {
           const dropPct = (tvl6m - d.tvl) / tvl6m * 100;
-          if (dropPct > 30) tvlS = Math.min(5, Math.round((dropPct - 30) * 0.2));
+          if (dropPct > 30) tvlS = Math.min(Math.floor(wTvl / 2), Math.round((dropPct - 30) * 0.2));
         }
       }
 
-      // ⑥ CVD Signal (0–10 pts)
+      // ⑥ CVD Signal (0–wCvd pts)
       if (d.cvd != null && d.cvd > 0) {
-        cvdS = Math.min(10, Math.round(d.cvd / 12));
-        if (i >= 1 && raw[i - 1].cvd < 0) cvdS = Math.min(10, cvdS + 3);
+        cvdS = Math.min(wCvd, Math.round(d.cvd / 12));
+        if (i >= 1 && raw[i - 1].cvd < 0) cvdS = Math.min(wCvd, cvdS + 3);
       }
     }
 
@@ -273,9 +281,82 @@ function Stat({ label, value, color }) {
 // ─── Main Component ───────────────────────────────────────────────────────────
 export default function OCMBottomIndicator() {
   const [tab, setTab] = useState("price");
-  const data = useMemo(() => buildOCM(RAW), []);
+
+  // ML layer — active weights (default or optimizer-tuned)
+  const [weights, setWeights] = useState(DEFAULT_WEIGHTS);
+  const [optimizing, setOptimizing] = useState(false);
+  const [optimResult, setOptimResult] = useState(null);
+
+  // Agentique layer — live market data
+  const [liveBTC, setLiveBTC] = useState(null);
+  const [liveTVL, setLiveTVL] = useState(null);
+  const [liveLoading, setLiveLoading] = useState(false);
+  const prevZoneRef = useRef(null);
+
+  // Agentique layer — signal memory
+  const [signalHistory, setSignalHistory] = useState(() => loadSignalHistory());
+
+  // IA Générative layer — Claude API analysis
+  const [apiKey, setApiKey] = useState(() => localStorage.getItem("ocm_api_key") || "");
+  const [aiAnalysis, setAiAnalysis] = useState(null);
+  const [analyzing, setAnalyzing] = useState(false);
+
+  const data = useMemo(() => buildOCM(RAW, weights), [weights]);
   const latest = data[data.length - 1];
   const signals = data.filter(d => d.signal);
+
+  // Auto-refresh live data every 5 minutes
+  useEffect(() => {
+    async function refresh() {
+      setLiveLoading(true);
+      const [btc, tvl] = await Promise.all([fetchLiveBTC(), fetchLiveTVL()]);
+      setLiveBTC(btc);
+      setLiveTVL(tvl);
+      setLiveLoading(false);
+      // Check for zone transitions and notify
+      if (prevZoneRef.current) {
+        checkZoneTransition(prevZoneRef.current, latest.zone, latest);
+      }
+      prevZoneRef.current = latest.zone;
+    }
+    refresh();
+    const timer = setInterval(refresh, 5 * 60 * 1000);
+    return () => clearInterval(timer);
+  }, [latest.zone]);
+
+  function handleOptimize() {
+    setOptimizing(true);
+    setTimeout(() => {
+      const result = runOptimizer(RAW);
+      setOptimResult(result);
+      setOptimizing(false);
+    }, 0);
+  }
+
+  function applyOptimizedWeights() {
+    if (optimResult) setWeights(optimResult.weights);
+  }
+
+  async function handleAnalyze() {
+    setAnalyzing(true);
+    setAiAnalysis(null);
+    localStorage.setItem("ocm_api_key", apiKey);
+    const analysis = await analyzeWithClaude(latest, apiKey);
+    setAiAnalysis(analysis);
+    setAnalyzing(false);
+  }
+
+  async function handleEnableNotifications() {
+    const granted = await requestNotificationPermission();
+    if (granted) {
+      setSignalHistory([saveSignalToMemory(latest), ...loadSignalHistory().slice(1)]);
+    }
+  }
+
+  function handleSaveSignal() {
+    saveSignalToMemory(latest);
+    setSignalHistory(loadSignalHistory());
+  }
 
   // Groupes de zones consécutives pour les fonds colorés
   const zoneGroups = useMemo(() => {
@@ -307,7 +388,7 @@ export default function OCMBottomIndicator() {
     bull: C.blue, neutral: C.muted, none: C.muted,
   }[latest.zone] ?? C.muted;
 
-  const tabs = ["price", "score", "breakdown", "tvl"];
+  const tabs = ["price", "score", "breakdown", "tvl", "ai"];
 
   return (
     <div style={{ background: C.bg, minHeight: "100vh", color: C.text, fontFamily: "monospace" }}>
@@ -315,8 +396,15 @@ export default function OCMBottomIndicator() {
       {/* ── Header ── */}
       <div style={{ background: C.surface, borderBottom: `1px solid ${C.border}`, padding: "16px 20px", display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: 12 }}>
         <div>
-          <div style={{ fontSize: 9, color: C.muted, letterSpacing: 4, textTransform: "uppercase", marginBottom: 4 }}>
+          <div style={{ fontSize: 9, color: C.muted, letterSpacing: 4, textTransform: "uppercase", marginBottom: 4, display: "flex", alignItems: "center", gap: 12 }}>
             LiquidityAlert · OpenClaw Master v4
+            {liveBTC && (
+              <span style={{ color: Number(liveBTC.change24h) >= 0 ? C.green : C.orange, letterSpacing: 1 }}>
+                LIVE ${liveBTC.price.toLocaleString()} ({liveBTC.change24h > 0 ? "+" : ""}{liveBTC.change24h}% 24h)
+                {liveLoading && <span style={{ color: C.muted }}> ↻</span>}
+              </span>
+            )}
+            {!liveBTC && liveLoading && <span style={{ color: C.muted }}>Fetching live data...</span>}
           </div>
           <div style={{ fontSize: 18, color: C.cyan, letterSpacing: 2, fontWeight: "bold" }}>
             OCM CYCLE BOTTOM COMPOSITE
@@ -363,7 +451,7 @@ export default function OCMBottomIndicator() {
             color: tab === t ? C.cyan : C.muted,
             borderBottom: tab === t ? `2px solid ${C.cyan}` : "2px solid transparent",
           }}>
-            {t === "price" ? "PRICE + MA12" : t === "score" ? "COMPOSITE SCORE" : t === "breakdown" ? "DECOMPOSITION" : "TVL + CVD"}
+            {t === "price" ? "PRICE + MA12" : t === "score" ? "COMPOSITE SCORE" : t === "breakdown" ? "DECOMPOSITION" : t === "tvl" ? "TVL + CVD" : "⚡ AI AGENT"}
           </button>
         ))}
       </div>
@@ -559,6 +647,146 @@ export default function OCMBottomIndicator() {
             </ResponsiveContainer>
           </>
         )}
+        {/* ── AI AGENT TAB ── */}
+        {tab === "ai" && (
+          <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
+
+            {/* Section 1 — Live Data */}
+            <div style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 8, padding: "16px 20px" }}>
+              <div style={{ fontSize: 9, color: C.cyan, letterSpacing: 3, marginBottom: 12 }}>LIVE DATA FEED · AUTO-REFRESH 5MIN</div>
+              <div style={{ display: "flex", gap: 20, flexWrap: "wrap", alignItems: "flex-start" }}>
+                {liveBTC ? (
+                  <div>
+                    <div style={{ fontSize: 20, color: C.text, fontWeight: "bold" }}>${liveBTC.price.toLocaleString()}</div>
+                    <div style={{ fontSize: 11, color: Number(liveBTC.change24h) >= 0 ? C.green : C.orange }}>
+                      {liveBTC.change24h > 0 ? "+" : ""}{liveBTC.change24h}% 24h
+                    </div>
+                    <div style={{ fontSize: 9, color: C.muted, marginTop: 4 }}>
+                      Mis à jour: {liveBTC.updatedAt.toLocaleTimeString()}
+                    </div>
+                  </div>
+                ) : (
+                  <div style={{ color: C.muted, fontSize: 11 }}>CoinGecko: chargement…</div>
+                )}
+                {liveTVL && (
+                  <div>
+                    <div style={{ fontSize: 9, color: C.muted, letterSpacing: 2, marginBottom: 4 }}>TVL GLOBAL</div>
+                    <div style={{ fontSize: 18, color: C.teal, fontWeight: "bold" }}>${liveTVL.tvl}B</div>
+                    <div style={{ fontSize: 9, color: C.muted, marginTop: 4 }}>
+                      Source: DeFiLlama · {liveTVL.date.toLocaleDateString()}
+                    </div>
+                  </div>
+                )}
+                <button onClick={() => { setLiveLoading(true); Promise.all([fetchLiveBTC(), fetchLiveTVL()]).then(([b, t]) => { setLiveBTC(b); setLiveTVL(t); setLiveLoading(false); }); }}
+                  style={{ background: C.border, border: `1px solid ${C.borderMid}`, color: C.text, padding: "8px 16px", borderRadius: 4, cursor: "pointer", fontFamily: "monospace", fontSize: 10, letterSpacing: 1 }}>
+                  {liveLoading ? "↻ Fetching…" : "↻ Refresh Now"}
+                </button>
+                <button onClick={handleEnableNotifications}
+                  style={{ background: "#0a1628", border: `1px solid ${C.cyan}44`, color: C.cyan, padding: "8px 16px", borderRadius: 4, cursor: "pointer", fontFamily: "monospace", fontSize: 10, letterSpacing: 1 }}>
+                  🔔 Activer Alertes
+                </button>
+                <button onClick={handleSaveSignal}
+                  style={{ background: "#0a1628", border: `1px solid ${C.amber}44`, color: C.amber, padding: "8px 16px", borderRadius: 4, cursor: "pointer", fontFamily: "monospace", fontSize: 10, letterSpacing: 1 }}>
+                  💾 Mémoriser Signal
+                </button>
+              </div>
+            </div>
+
+            {/* Section 2 — ML Weight Optimizer */}
+            <div style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 8, padding: "16px 20px" }}>
+              <div style={{ fontSize: 9, color: C.purple, letterSpacing: 3, marginBottom: 12 }}>MACHINE LEARNING · OPTIMISEUR GÉNÉTIQUE DES POIDS</div>
+              <div style={{ fontSize: 10, color: C.muted, marginBottom: 12 }}>
+                Algorithme génétique (60 pop · 120 générations) entraîné sur les fonds confirmés BTC 2018–2022. Maximise le score aux vrais creux, minimise les faux signaux.
+              </div>
+              <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 12 }}>
+                <button onClick={handleOptimize} disabled={optimizing}
+                  style={{ background: optimizing ? C.border : "#1a0a2e", border: `1px solid ${C.purple}`, color: C.purple, padding: "10px 20px", borderRadius: 4, cursor: optimizing ? "not-allowed" : "pointer", fontFamily: "monospace", fontSize: 10, letterSpacing: 2 }}>
+                  {optimizing ? "RUNNING GENETIC ALGO…" : "▶ RUN ML OPTIMIZER"}
+                </button>
+                {optimResult && (
+                  <>
+                    <button onClick={applyOptimizedWeights}
+                      style={{ background: "#001810", border: `1px solid ${C.green}`, color: C.green, padding: "10px 16px", borderRadius: 4, cursor: "pointer", fontFamily: "monospace", fontSize: 10 }}>
+                      ✓ Appliquer poids ML (+{optimResult.improvement}%)
+                    </button>
+                    <button onClick={() => { setWeights(DEFAULT_WEIGHTS); setOptimResult(null); }}
+                      style={{ background: C.border, border: `1px solid ${C.muted}`, color: C.muted, padding: "10px 16px", borderRadius: 4, cursor: "pointer", fontFamily: "monospace", fontSize: 10 }}>
+                      Reset par défaut
+                    </button>
+                  </>
+                )}
+              </div>
+              {optimResult && (
+                <div style={{ background: "#04080f", borderRadius: 6, padding: "12px 16px", border: `1px solid ${C.purple}33` }}>
+                  <div style={{ fontSize: 9, color: C.green, marginBottom: 8 }}>Amélioration fitness: +{optimResult.improvement}% (baseline: {optimResult.baseline.toFixed(1)} → {optimResult.fitness.toFixed(1)})</div>
+                  <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
+                    {Object.entries(optimResult.weights).map(([k, v]) => (
+                      <div key={k} style={{ textAlign: "center" }}>
+                        <div style={{ fontSize: 9, color: C.muted, letterSpacing: 1 }}>{k.toUpperCase()}</div>
+                        <div style={{ fontSize: 14, color: C.purple, fontWeight: "bold" }}>{v}</div>
+                        <div style={{ fontSize: 8, color: C.muted }}>was {DEFAULT_WEIGHTS[k]}</div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+              <div style={{ marginTop: 12, display: "flex", gap: 12, flexWrap: "wrap" }}>
+                <div style={{ fontSize: 9, color: C.muted }}>Poids actifs:</div>
+                {Object.entries(weights).map(([k, v]) => (
+                  <span key={k} style={{ fontSize: 9, color: weights[k] !== DEFAULT_WEIGHTS[k] ? C.purple : C.muted }}>
+                    {k}: <strong style={{ color: C.text }}>{v}</strong>
+                  </span>
+                ))}
+              </div>
+            </div>
+
+            {/* Section 3 — Claude AI Analysis */}
+            <div style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 8, padding: "16px 20px" }}>
+              <div style={{ fontSize: 9, color: C.amber, letterSpacing: 3, marginBottom: 12 }}>IA GÉNÉRATIVE · ANALYSE CLAUDE (HAIKU)</div>
+              <div style={{ display: "flex", gap: 8, marginBottom: 12, flexWrap: "wrap" }}>
+                <input
+                  type="password"
+                  placeholder="Clé API Claude (sk-ant-api03-…)"
+                  value={apiKey}
+                  onChange={e => setApiKey(e.target.value)}
+                  style={{ background: "#04080f", border: `1px solid ${C.borderMid}`, color: C.text, padding: "8px 12px", borderRadius: 4, fontFamily: "monospace", fontSize: 11, flex: 1, minWidth: 240 }}
+                />
+                <button onClick={handleAnalyze} disabled={!apiKey || analyzing}
+                  style={{ background: analyzing ? C.border : "#1a1200", border: `1px solid ${C.amber}`, color: C.amber, padding: "8px 18px", borderRadius: 4, cursor: (!apiKey || analyzing) ? "not-allowed" : "pointer", fontFamily: "monospace", fontSize: 10, letterSpacing: 1 }}>
+                  {analyzing ? "Analyse…" : "⚡ Analyser Signal"}
+                </button>
+              </div>
+              {aiAnalysis && (
+                <div style={{ background: "#04080f", borderRadius: 6, padding: "14px 16px", border: `1px solid ${C.amber}33`, fontSize: 12, color: C.text, lineHeight: 1.6 }}>
+                  <div style={{ fontSize: 9, color: C.amber, letterSpacing: 2, marginBottom: 8 }}>ANALYSE CLAUDE · {latest.date} · Score {latest.score}/100</div>
+                  {aiAnalysis}
+                </div>
+              )}
+            </div>
+
+            {/* Section 4 — Signal Memory */}
+            <div style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 8, padding: "16px 20px" }}>
+              <div style={{ fontSize: 9, color: C.teal, letterSpacing: 3, marginBottom: 12 }}>MÉMOIRE AGENTIQUE · HISTORIQUE DES SIGNAUX SAUVEGARDÉS</div>
+              {signalHistory.length === 0 ? (
+                <div style={{ color: C.muted, fontSize: 11 }}>Aucun signal mémorisé. Cliquez "Mémoriser Signal" pour commencer.</div>
+              ) : (
+                <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                  {signalHistory.slice(0, 10).map(s => (
+                    <div key={s.id} style={{ display: "flex", gap: 16, alignItems: "center", background: "#04080f", borderRadius: 4, padding: "8px 12px", borderLeft: `3px solid ${s.zone === "strong" ? C.green : s.zone === "watch" ? C.amber : C.orange}` }}>
+                      <span style={{ fontSize: 10, color: C.cyan, minWidth: 60 }}>{s.date}</span>
+                      <span style={{ fontSize: 10, color: C.text }}>Score: <strong>{s.score}</strong></span>
+                      <span style={{ fontSize: 9, color: C.muted }}>{s.zone.toUpperCase()}</span>
+                      <span style={{ fontSize: 10, color: C.text }}>${s.price?.toLocaleString()}</span>
+                      <span style={{ fontSize: 9, color: C.muted, marginLeft: "auto" }}>{new Date(s.savedAt).toLocaleString()}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
+          </div>
+        )}
+
       </div>
 
       {/* ── Formula Card ── */}
