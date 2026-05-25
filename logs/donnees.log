@@ -1,0 +1,8 @@
+2026-05-24 10:55:22,122 [INFO] Collecte des données de marché live...
+2026-05-24 10:55:22,185 [WARNING] CoinGecko échec: Expecting value: line 1 column 1 (char 0). Utilisation dernière donnée.
+2026-05-24 10:55:22,245 [WARNING] DeFiLlama échec: Expecting value: line 1 column 1 (char 0)
+2026-05-24 10:55:22,245 [INFO] Données écrites → /home/user/liquidityalert-indicator/projet_partage/02_donnees/market_data.json
+2026-05-24 11:29:26,950 [INFO] Collecte des données de marché live...
+2026-05-24 11:29:27,002 [WARNING] CoinGecko échec: Expecting value: line 1 column 1 (char 0). Utilisation dernière donnée.
+2026-05-24 11:29:27,068 [WARNING] DeFiLlama échec: Expecting value: line 1 column 1 (char 0)
+2026-05-24 11:29:27,069 [INFO] Données écrites → /home/user/liquidityalert-indicator/projet_partage/02_donnees/market_data.json

@@ -1,0 +1,56 @@
+{
+  "computed_at": "2026-05-24T11:29:26.950307",
+  "live_price": 77559,
+  "date": "May 26",
+  "score": 41,
+  "zone": "watch",
+  "signal": false,
+  "ma12": 94041,
+  "deviation_pct": -17.5,
+  "components": {
+    "devS": 8,
+    "slopeS": 5,
+    "momS": 15,
+    "durS": 10,
+    "tvlS": 3,
+    "cvdS": 0,
+    "crashS": 0
+  },
+  "signals_history": [
+    {
+      "date": "Nov 18",
+      "score": 50,
+      "price": 4200
+    },
+    {
+      "date": "Dec 18",
+      "score": 61,
+      "price": 3220
+    },
+    {
+      "date": "Feb 19",
+      "score": 55,
+      "price": 3850
+    },
+    {
+      "date": "Jun 22",
+      "score": 55,
+      "price": 19000
+    },
+    {
+      "date": "Jul 22",
+      "score": 61,
+      "price": 23300
+    },
+    {
+      "date": "Sep 22",
+      "score": 55,
+      "price": 19400
+    },
+    {
+      "date": "Dec 22",
+      "score": 53,
+      "price": 16530
+    }
+  ]
+}
