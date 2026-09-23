@@ -74,14 +74,18 @@ const RAW = [
   { d:"Nov 25", p:90327,  tvl:140., cvd:-35 }, { d:"Dec 25", p:87624,  tvl:132., cvd:-45 },
   { d:"Jan 26", p:78698,  tvl:118., cvd:-50 }, { d:"Feb 26", p:66932,  tvl:88.0, cvd:-72 },
   { d:"Mar 26", p:68237,  tvl:82.0, cvd:-60 }, { d:"Apr 26", p:77559,  tvl:88.0, cvd:-30 },
+  // 2026 Q2-Q3 — compression de volatilité (range $75k-$80k)
+  { d:"May 26", p:79200,  tvl:90.0, cvd:-20 }, { d:"Jun 26", p:76800,  tvl:88.0, cvd:-25 },
+  { d:"Jul 26", p:78500,  tvl:91.0, cvd:-15 }, { d:"Aug 26", p:75900,  tvl:87.0, cvd:-28 },
+  { d:"Sep 26", p:77400,  tvl:89.0, cvd:-20 },
 ];
 
 // ─── Indicator Engine ─────────────────────────────────────────────────────────
-// Scoring v4: devS/30 · slopeS/20 · momS/15 · durS/15 · tvlS/10 · cvdS/10 · crashS/15
+// Scoring v5: devS/30 · slopeS/20 · momS/15 · durS/15 · tvlS/10 · cvdS/10 · crashS/15 · volS/15
 // weights param enables ML optimization via genetic algorithm (src/optimizer.js)
 function buildOCM(raw, weights = DEFAULT_WEIGHTS) {
   const { dev: wDev, slope: wSlope, bounce: wBounce, duration: wDur,
-          tvl: wTvl, cvd: wCvd, crash: wCrash } = weights;
+          tvl: wTvl, cvd: wCvd, crash: wCrash, vol: wVol = 15 } = weights;
   const MA_P = 12;
 
   const mas = raw.map((_, i) => {
@@ -96,12 +100,12 @@ function buildOCM(raw, weights = DEFAULT_WEIGHTS) {
     if (!ma) return {
       date: d.d, price: d.p, tvl: d.tvl, cvd: d.cvd,
       ma: null, score: 0,
-      devS: 0, slopeS: 0, momS: 0, durS: 0, tvlS: 0, cvdS: 0, crashS: 0,
+      devS: 0, slopeS: 0, momS: 0, durS: 0, tvlS: 0, cvdS: 0, crashS: 0, volS: 0,
       zone: "none", signal: false,
     };
 
     const dev = (d.p - ma) / ma * 100;
-    let devS = 0, slopeS = 0, momS = 0, durS = 0, tvlS = 0, cvdS = 0, crashS = 0;
+    let devS = 0, slopeS = 0, momS = 0, durS = 0, tvlS = 0, cvdS = 0, crashS = 0, volS = 0;
 
     if (dev < 0) {
 
@@ -190,9 +194,27 @@ function buildOCM(raw, weights = DEFAULT_WEIGHTS) {
         cvdS = Math.min(wCvd, Math.round(d.cvd / 12));
         if (i >= 1 && raw[i - 1].cvd < 0) cvdS = Math.min(wCvd, cvdS + 3);
       }
+
+      // ⑧ Volatility Compression (0–wVol pts) — ratio std3m / std12m
+      if (i >= MA_P) {
+        const pctChange = j => (raw[j].p - raw[j - 1].p) / raw[j - 1].p * 100;
+        const changes3 = [pctChange(i), pctChange(i - 1), pctChange(i - 2)];
+        const mean3 = changes3.reduce((s, v) => s + v, 0) / 3;
+        const std3 = Math.sqrt(changes3.reduce((s, v) => s + (v - mean3) ** 2, 0) / 3);
+        const changes12 = [];
+        for (let j = Math.max(1, i - 11); j <= i; j++) changes12.push(pctChange(j));
+        const mean12 = changes12.reduce((s, v) => s + v, 0) / changes12.length;
+        const std12 = Math.sqrt(changes12.reduce((s, v) => s + (v - mean12) ** 2, 0) / changes12.length);
+        if (std12 > 0) {
+          const ratio = std3 / std12;
+          if (ratio < 0.4)      volS = wVol;
+          else if (ratio < 0.6) volS = Math.round(wVol * 0.6);
+          else if (ratio < 0.8) volS = Math.round(wVol * 0.3);
+        }
+      }
     }
 
-    const total = Math.min(100, devS + slopeS + momS + durS + tvlS + cvdS + crashS);
+    const total = Math.min(100, devS + slopeS + momS + durS + tvlS + cvdS + crashS + volS);
     let zone = "none";
     if (dev >= 0)        zone = "bull";
     else if (total >= 50) zone = "strong";
@@ -206,7 +228,7 @@ function buildOCM(raw, weights = DEFAULT_WEIGHTS) {
       ma: Math.round(ma),
       dev: Math.round(dev * 10) / 10,
       score: total,
-      devS, slopeS, momS, durS, tvlS, cvdS, crashS,
+      devS, slopeS, momS, durS, tvlS, cvdS, crashS, volS,
       zone,
       signal: total >= 50,
     };
@@ -262,6 +284,7 @@ function CustomTooltip({ active, payload }) {
           <div style={{ color: C.muted }}>Bnce {d.momS}/15 · Dur   {d.durS}/15</div>
           <div style={{ color: C.muted }}>TVL  {d.tvlS}/10 · CVD   {d.cvdS}/10</div>
           {d.crashS > 0 && <div style={{ color: C.orange }}>Crash {d.crashS}/15 ⚡</div>}
+          {d.volS > 0 && <div style={{ color: C.green }}>Vol ∿ {d.volS}/15 🗜</div>}
         </>
       )}
     </div>
@@ -397,7 +420,7 @@ export default function OCMBottomIndicator() {
       <div style={{ background: C.surface, borderBottom: `1px solid ${C.border}`, padding: "16px 20px", display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: 12 }}>
         <div>
           <div style={{ fontSize: 9, color: C.muted, letterSpacing: 4, textTransform: "uppercase", marginBottom: 4, display: "flex", alignItems: "center", gap: 12 }}>
-            LiquidityAlert · OpenClaw Master v4
+            LiquidityAlert · OpenClaw Master v5
             {liveBTC && (
               <span style={{ color: Number(liveBTC.change24h) >= 0 ? C.green : C.orange, letterSpacing: 1 }}>
                 LIVE ${liveBTC.price.toLocaleString()} ({liveBTC.change24h > 0 ? "+" : ""}{liveBTC.change24h}% 24h)
@@ -410,7 +433,7 @@ export default function OCMBottomIndicator() {
             OCM CYCLE BOTTOM COMPOSITE
           </div>
           <div style={{ fontSize: 10, color: C.muted, marginTop: 4 }}>
-            MA12 · Deviation · Slope · Bounce · Duration · TVL Recovery · CVD Signal
+            MA12 · Deviation · Slope · Bounce · Duration · TVL · CVD · Vol Compression
           </div>
         </div>
         <div style={{
@@ -418,7 +441,7 @@ export default function OCMBottomIndicator() {
           border: `1px solid ${zoneColor}`, borderRadius: 8,
           padding: "12px 20px", textAlign: "center", minWidth: 130,
         }}>
-          <div style={{ fontSize: 9, color: C.muted, letterSpacing: 2, marginBottom: 4 }}>CURRENT · APR 2026</div>
+          <div style={{ fontSize: 9, color: C.muted, letterSpacing: 2, marginBottom: 4 }}>CURRENT · SEP 2026</div>
           <div style={{ fontSize: 36, color: zoneColor, fontWeight: "bold", lineHeight: 1 }}>{latest.score}</div>
           <div style={{ fontSize: 9, color: zoneColor, letterSpacing: 2, marginTop: 4 }}>{zoneLabel}</div>
         </div>
@@ -438,6 +461,7 @@ export default function OCMBottomIndicator() {
         <Stat label="TVL /10"    value={`${latest.tvlS}`}   color={C.teal} />
         <Stat label="CVD /10"    value={`${latest.cvdS}`}   color={C.pink} />
         <Stat label="CRASH /15"  value={`${latest.crashS}`} color={C.orange} />
+        <Stat label="VOL /15"    value={`${latest.volS}`}   color={C.green} />
         <Stat label="SIGNALS"    value={`${signals.length} detected`} color={C.green} />
       </div>
 
@@ -586,7 +610,8 @@ export default function OCMBottomIndicator() {
                 <Bar dataKey="durS"   stackId="a" fill={C.cyan}   maxBarSize={12} />
                 <Bar dataKey="tvlS"   stackId="a" fill={C.teal}   maxBarSize={12} />
                 <Bar dataKey="cvdS"   stackId="a" fill={C.pink}   maxBarSize={12} />
-                <Bar dataKey="crashS" stackId="a" fill={C.orange} maxBarSize={12} radius={[2, 2, 0, 0]} />
+                <Bar dataKey="crashS" stackId="a" fill={C.orange} maxBarSize={12} />
+                <Bar dataKey="volS"   stackId="a" fill={C.green}  maxBarSize={12} radius={[2, 2, 0, 0]} />
               </ComposedChart>
             </ResponsiveContainer>
             <div style={{ display: "flex", gap: 16, marginTop: 16, justifyContent: "center", flexWrap: "wrap" }}>
@@ -598,6 +623,7 @@ export default function OCMBottomIndicator() {
                 { color: C.teal,   label: "TVL Recovery /10", desc: "Reprise du capital institutionnel" },
                 { color: C.pink,   label: "CVD Signal /10", desc: "Pression acheteuse nette" },
                 { color: C.orange, label: "Flash Crash /15", desc: "Chute brutale > 15% en 2 mois" },
+                { color: C.green,  label: "Vol Compression /15", desc: "Ratio std3m/std12m < 0.4 = énergie comprimée" },
               ].map((l, i) => (
                 <div key={i} style={{ display: "flex", alignItems: "center", gap: 8 }}>
                   <div style={{ width: 12, height: 12, background: l.color, borderRadius: 2, flexShrink: 0 }} />
@@ -800,6 +826,7 @@ export default function OCMBottomIndicator() {
             { n: "④", c: C.cyan,   t: "Duration /15",       f: "min(15, mois × 1.7)",              d: "Mois consécutifs sous MA12 = épuisement du cycle baissier." },
             { n: "⑤", c: C.teal,   t: "TVL Signal /10",     f: "reprise×0.8 ou drop>30%×0.2",     d: "v3: TVL en reprise = capital revenant. Chute TVL >30% = capitulation confirmée." },
             { n: "⑥", c: C.pink,   t: "CVD Signal /10",     f: "min(10, cvd/12 + bonus_retour)",   d: "CVD positif aux creux = pression acheteuse nette des institutions." },
+            { n: "⑧", c: C.green,  t: "Vol Compression /15", f: "ratio=std3m/std12m · <0.4→15 · <0.6→9 · <0.8→5", d: "Volatilité comprimée = énergie accumulée avant explosion de prix." },
           ].map((comp, i) => (
             <div key={i} style={{ background: "#04080f", borderRadius: 6, padding: "10px 12px", borderLeft: `3px solid ${comp.c}` }}>
               <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 5 }}>
@@ -814,8 +841,8 @@ export default function OCMBottomIndicator() {
           ))}
         </div>
         <div style={{ marginTop: 12, padding: "10px 14px", background: "#04080f", borderRadius: 6, border: `1px solid ${C.green}22` }}>
-          <span style={{ color: C.green, fontSize: 10 }}>SIGNAL FINAL v4: </span>
-          <span style={{ color: C.text, fontSize: 10 }}> Score = ①+②+③+④+⑤+⑥+⑦ ∈ [0,100] · Signal actif si </span>
+          <span style={{ color: C.green, fontSize: 10 }}>SIGNAL FINAL v5: </span>
+          <span style={{ color: C.text, fontSize: 10 }}> Score = ①+②+③+④+⑤+⑥+⑦+⑧ ∈ [0,100] · Signal actif si </span>
           <span style={{ color: C.green, fontSize: 10 }}>score ≥ 50</span>
           <span style={{ color: C.muted, fontSize: 10 }}> · Watch ≥ 35 · Early ≥ 15 · Lagging confirmator (1–3 mois après creux)</span>
         </div>

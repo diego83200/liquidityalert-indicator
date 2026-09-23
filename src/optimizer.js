@@ -2,14 +2,14 @@
 // Uses known BTC bottom months as labeled training data
 
 export const DEFAULT_WEIGHTS = {
-  dev: 30, slope: 20, bounce: 15, duration: 15, tvl: 10, cvd: 10, crash: 15,
+  dev: 30, slope: 20, bounce: 15, duration: 15, tvl: 10, cvd: 10, crash: 15, vol: 15,
 };
 
 // Historical confirmed bottoms (labeled data for supervised optimization)
 const KNOWN_BOTTOMS = new Set(["Dec 18", "Mar 20", "Jun 22", "Nov 22"]);
 
-const KEYS = ["dev", "slope", "bounce", "duration", "tvl", "cvd", "crash"];
-const MAX_W = { dev: 45, slope: 30, bounce: 25, duration: 25, tvl: 20, cvd: 20, crash: 25 };
+const KEYS = ["dev", "slope", "bounce", "duration", "tvl", "cvd", "crash", "vol"];
+const MAX_W = { dev: 45, slope: 30, bounce: 25, duration: 25, tvl: 20, cvd: 20, crash: 25, vol: 25 };
 
 function buildWithWeights(raw, w) {
   const MA_P = 12;
@@ -23,7 +23,7 @@ function buildWithWeights(raw, w) {
     const ma = mas[i];
     if (!ma) return { date: d.d, score: 0, zone: "none" };
     const dev = (d.p - ma) / ma * 100;
-    let devS = 0, slopeS = 0, momS = 0, durS = 0, tvlS = 0, cvdS = 0, crashS = 0;
+    let devS = 0, slopeS = 0, momS = 0, durS = 0, tvlS = 0, cvdS = 0, crashS = 0, volS = 0;
 
     if (dev < 0) {
       let maDeclining = false;
@@ -94,9 +94,26 @@ function buildWithWeights(raw, w) {
         cvdS = Math.min(w.cvd, Math.round(d.cvd / 12));
         if (i >= 1 && raw[i - 1].cvd < 0) cvdS = Math.min(w.cvd, cvdS + 3);
       }
+
+      if (i >= MA_P) {
+        const pc = j => (raw[j].p - raw[j - 1].p) / raw[j - 1].p * 100;
+        const c3 = [pc(i), pc(i - 1), pc(i - 2)];
+        const m3 = c3.reduce((s, v) => s + v, 0) / 3;
+        const s3 = Math.sqrt(c3.reduce((s, v) => s + (v - m3) ** 2, 0) / 3);
+        const c12 = [];
+        for (let j = Math.max(1, i - 11); j <= i; j++) c12.push(pc(j));
+        const m12 = c12.reduce((s, v) => s + v, 0) / c12.length;
+        const s12 = Math.sqrt(c12.reduce((s, v) => s + (v - m12) ** 2, 0) / c12.length);
+        if (s12 > 0) {
+          const ratio = s3 / s12;
+          if (ratio < 0.4)      volS = w.vol;
+          else if (ratio < 0.6) volS = Math.round(w.vol * 0.6);
+          else if (ratio < 0.8) volS = Math.round(w.vol * 0.3);
+        }
+      }
     }
 
-    const total = Math.min(100, devS + slopeS + momS + durS + tvlS + cvdS + crashS);
+    const total = Math.min(100, devS + slopeS + momS + durS + tvlS + cvdS + crashS + volS);
     const zone = dev >= 0 ? "bull"
       : total >= 50 ? "strong"
       : total >= 35 ? "watch"

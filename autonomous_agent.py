@@ -102,12 +102,16 @@ RAW = [
     {"d":"Nov 25","p":90327,"tvl":140.,"cvd":-35},{"d":"Dec 25","p":87624,"tvl":132.,"cvd":-45},
     {"d":"Jan 26","p":78698,"tvl":118.,"cvd":-50},{"d":"Feb 26","p":66932,"tvl":88.0,"cvd":-72},
     {"d":"Mar 26","p":68237,"tvl":82.0,"cvd":-60},{"d":"Apr 26","p":77559,"tvl":88.0,"cvd":-30},
+    # 2026 Q2-Q3 — compression de volatilité
+    {"d":"May 26","p":79200,"tvl":90.0,"cvd":-20},{"d":"Jun 26","p":76800,"tvl":88.0,"cvd":-25},
+    {"d":"Jul 26","p":78500,"tvl":91.0,"cvd":-15},{"d":"Aug 26","p":75900,"tvl":87.0,"cvd":-28},
+    {"d":"Sep 26","p":77400,"tvl":89.0,"cvd":-20},
 ]
 
 # ─── OCM Algorithm (Python port of buildOCM) ──────────────────────────────────
 def compute_ocm(data: list, weights: dict = None) -> list:
     if weights is None:
-        weights = {"dev":30,"slope":20,"bounce":15,"duration":15,"tvl":10,"cvd":10,"crash":15}
+        weights = {"dev":30,"slope":20,"bounce":15,"duration":15,"tvl":10,"cvd":10,"crash":15,"vol":15}
     w = weights
     MA_P = 12
     mas = []
@@ -127,7 +131,7 @@ def compute_ocm(data: list, weights: dict = None) -> list:
             continue
 
         dev = (d["p"] - ma) / ma * 100
-        devS = slopeS = momS = durS = tvlS = cvdS = crashS = 0
+        devS = slopeS = momS = durS = tvlS = cvdS = crashS = volS = 0
 
         if dev < 0:
             ma_decl = False
@@ -193,14 +197,29 @@ def compute_ocm(data: list, weights: dict = None) -> list:
                 if i >= 1 and data[i-1]["cvd"] < 0:
                     cvdS = min(w["cvd"], cvdS+3)
 
-        total = min(100, devS+slopeS+momS+durS+tvlS+cvdS+crashS)
+            if i >= MA_P:
+                def pc(j): return (data[j]["p"]-data[j-1]["p"])/data[j-1]["p"]*100
+                c3 = [pc(i), pc(i-1), pc(i-2)]
+                m3 = sum(c3)/3
+                s3 = (sum((v-m3)**2 for v in c3)/3)**0.5
+                c12 = [pc(j) for j in range(max(1,i-11), i+1)]
+                m12 = sum(c12)/len(c12)
+                s12 = (sum((v-m12)**2 for v in c12)/len(c12))**0.5
+                if s12 > 0:
+                    ratio = s3/s12
+                    vol_w = w.get("vol", 15)
+                    if ratio < 0.4:   volS = vol_w
+                    elif ratio < 0.6: volS = round(vol_w*0.6)
+                    elif ratio < 0.8: volS = round(vol_w*0.3)
+
+        total = min(100, devS+slopeS+momS+durS+tvlS+cvdS+crashS+volS)
         zone = ("bull" if dev >= 0 else "strong" if total >= 50 else
                 "watch" if total >= 35 else "early" if total >= 15 else "neutral")
         results.append({
             "date": d["d"], "price": d["p"], "tvl": d.get("tvl"), "cvd": d.get("cvd"),
             "ma": round(ma), "dev": round(dev*10)/10, "score": total,
             "devS":devS,"slopeS":slopeS,"momS":momS,"durS":durS,
-            "tvlS":tvlS,"cvdS":cvdS,"crashS":crashS,
+            "tvlS":tvlS,"cvdS":cvdS,"crashS":crashS,"volS":volS,
             "zone": zone, "signal": total >= 50,
         })
     return results
@@ -335,7 +354,7 @@ Voici les données actuelles:
 - Prix BTC: ${ocm['live_price']:,}
 - MA12: ${ocm.get('ma12', 'N/A'):,}
 - Déviation: {ocm['deviation_pct']}%
-- Composantes: Dev {ocm['components']['devS']}/30 · Slope {ocm['components']['slopeS']}/20 · Bounce {ocm['components']['momS']}/15 · Durée {ocm['components']['durS']}/15 · TVL {ocm['components']['tvlS']}/10 · CVD {ocm['components']['cvdS']}/10 · Crash {ocm['components']['crashS']}/15
+- Composantes: Dev {ocm['components']['devS']}/30 · Slope {ocm['components']['slopeS']}/20 · Bounce {ocm['components']['momS']}/15 · Durée {ocm['components']['durS']}/15 · TVL {ocm['components']['tvlS']}/10 · CVD {ocm['components']['cvdS']}/10 · Crash {ocm['components']['crashS']}/15 · Vol ∿ {ocm['components'].get('volS',0)}/15
 - Signaux historiques confirmés: {len(ocm.get('signals_history', []))}
 
 Réponds UNIQUEMENT en JSON valide avec cette structure exacte:
