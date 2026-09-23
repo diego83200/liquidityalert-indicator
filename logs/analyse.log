@@ -1,0 +1,20 @@
+2026-05-24 10:55:22,247 [INFO] Calcul du score OCM v4...
+2026-05-24 10:55:22,247 [INFO] Score OCM: 41/100 — Zone: WATCH
+2026-05-24 10:55:22,247 [INFO]   devS: 8
+2026-05-24 10:55:22,248 [INFO]   slopeS: 5
+2026-05-24 10:55:22,248 [INFO]   momS: 15
+2026-05-24 10:55:22,248 [INFO]   durS: 10
+2026-05-24 10:55:22,248 [INFO]   tvlS: 3
+2026-05-24 10:55:22,248 [INFO]   cvdS: 0
+2026-05-24 10:55:22,248 [INFO]   crashS: 0
+2026-05-24 10:55:22,248 [INFO] Résultat écrit → /home/user/liquidityalert-indicator/projet_partage/03_travail/ocm_result.json
+2026-05-24 11:29:27,775 [INFO] Calcul du score OCM v4...
+2026-05-24 11:29:27,777 [INFO] Score OCM: 41/100 — Zone: WATCH
+2026-05-24 11:29:27,777 [INFO]   devS: 8
+2026-05-24 11:29:27,777 [INFO]   slopeS: 5
+2026-05-24 11:29:27,777 [INFO]   momS: 15
+2026-05-24 11:29:27,777 [INFO]   durS: 10
+2026-05-24 11:29:27,777 [INFO]   tvlS: 3
+2026-05-24 11:29:27,777 [INFO]   cvdS: 0
+2026-05-24 11:29:27,777 [INFO]   crashS: 0
+2026-05-24 11:29:27,777 [INFO] Résultat écrit → /home/user/liquidityalert-indicator/projet_partage/03_travail/ocm_result.json
